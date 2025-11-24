@@ -15,7 +15,7 @@ A Rust library for efficient FFT-based cross-correlation of 1D real-valued signa
 
 - **High performance**:
   - Thread-local FFT planner caching for optimal performance
-  - O(N log N) complexity vs O(N×M) for naive sliding window
+  - O(N log N) complexity vs O(Nï¿½M) for naive sliding window
   - Zero-copy where possible
 
 - **Correct indexing**: Follows scipy.signal.correlate convention where output index k corresponds to the lag where `template[M-1]` aligns with `signal[k]`
@@ -61,14 +61,17 @@ signal[50..53].copy_from_slice(&template);
 // Correlate to find template location
 let result = fft_correlate_1d(&signal, &template, Mode::Same).unwrap();
 
-// Find peak location
+// Find peak location, filtering out non-finite values (NaN/Inf)
 let peak_idx = result.iter()
     .enumerate()
+    .filter(|(_, v)| v.is_finite())
     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-    .map(|(i, _)| i)
-    .unwrap();
+    .map(|(i, _)| i);
 
-println!("Template found at index: {}", peak_idx);
+match peak_idx {
+    Some(idx) => println!("Template found at index: {}", idx),
+    None => println!("No valid peak found (all values are NaN/Inf)"),
+}
 ```
 
 ## Mode Semantics
@@ -88,7 +91,7 @@ The library uses thread-local FFT planner caching to avoid repeated planning ove
 
 - Time complexity: O((N+M) log(N+M))
 - Space complexity: O(N+M)
-- Naive sliding window: O(N×M)
+- Naive sliding window: O(Nï¿½M)
 
 For large signals or templates, FFT-based correlation is significantly faster than direct convolution.
 
