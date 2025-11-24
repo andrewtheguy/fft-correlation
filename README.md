@@ -15,7 +15,7 @@ A Rust library for efficient FFT-based cross-correlation of 1D real-valued signa
 
 - **High performance**:
   - Thread-local FFT planner caching for optimal performance
-  - O(N log N) complexity vs O(N�M) for naive sliding window
+  - O(N log N) complexity vs O(N*M) for naive sliding window
   - Zero-copy where possible
 
 - **Correct indexing**: Follows scipy.signal.correlate convention where output index k corresponds to the lag where `template[M-1]` aligns with `signal[k]`
