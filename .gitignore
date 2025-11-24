@@ -1,0 +1,28 @@
+/target
+.idea/
+tmp/
+
+# Build artifacts
+web/dist
+web/node_modules
+wasm/pkg
+wasm/target
+
+# OS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.vscode-settings
+*.code-workspace
+
+# Node
+npm-debug.log
+yarn-error.log
+
+# Cloudflare
+.wrangler/
+wrangler.toml.local
