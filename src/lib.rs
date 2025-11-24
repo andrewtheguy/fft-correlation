@@ -178,6 +178,25 @@ pub fn fft_correlate_1d(signal: &[f32], template: &[f32], mode: Mode) -> Result<
 mod tests {
     use super::*;
 
+    // Naive correlation used for correctness checks in tests.
+    fn naive_full_correlation(signal: &[f32], template: &[f32]) -> Vec<f32> {
+        let output_len = signal.len() + template.len() - 1;
+        let mut result = vec![0.0; output_len];
+
+        for lag in 0..output_len {
+            let mut correlation = 0.0;
+            for i in 0..template.len() {
+                let signal_idx = lag as isize - (template.len() as isize - 1) + i as isize;
+                if (0..signal.len() as isize).contains(&signal_idx) {
+                    correlation += signal[signal_idx as usize] * template[i];
+                }
+            }
+            result[lag] = correlation;
+        }
+
+        result
+    }
+
     #[test]
     fn test_fft_correlate_mode_full_length() {
         let signal = vec![1.0, 2.0, 3.0, 4.0, 5.0];
@@ -302,29 +321,11 @@ mod tests {
 
     #[test]
     fn test_fft_correlate_vs_sliding_window() {
-        // Naive sliding window correlation for comparison
-        fn sliding_window_correlate(signal: &[f32], template: &[f32]) -> Vec<f32> {
-            let output_len = signal.len() + template.len() - 1;
-            let mut result = vec![0.0; output_len];
-
-            for lag in 0..output_len {
-                let mut correlation = 0.0;
-                for i in 0..template.len() {
-                    let signal_idx = lag as i32 - (template.len() as i32 - 1) + i as i32;
-                    if signal_idx >= 0 && signal_idx < signal.len() as i32 {
-                        correlation += signal[signal_idx as usize] * template[template.len() - 1 - i];
-                    }
-                }
-                result[lag] = correlation;
-            }
-            result
-        }
-
         let signal = vec![1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 1.0];
         let template = vec![0.5, 1.0, 0.5];
 
         let fft_result = fft_correlate_1d(&signal, &template, Mode::Full).unwrap();
-        let sliding_result = sliding_window_correlate(&signal, &template);
+        let sliding_result = naive_full_correlation(&signal, &template);
 
         assert_eq!(fft_result.len(), sliding_result.len());
         for (i, (&fft_val, &sliding_val)) in fft_result.iter().zip(sliding_result.iter()).enumerate() {
@@ -670,5 +671,102 @@ mod tests {
 
         assert!(same_peak_idx >= n / 2 - 2 && same_peak_idx <= n / 2 + 2,
             "Same mode peak should be near center, got index {}", same_peak_idx);
+    }
+
+    #[test]
+    fn test_fft_correlate_matches_naive_across_modes_small_vectors() {
+        for signal_len in 1..=5 {
+            for template_len in 1..=6 {
+                let signal: Vec<f32> = (0..signal_len)
+                    .map(|i| ((i as f32) * 0.7).cos() + (i as f32) * 0.05)
+                    .collect();
+                let template: Vec<f32> = (0..template_len)
+                    .map(|i| ((i as f32) * 0.4).sin() - (i as f32) * 0.03)
+                    .collect();
+
+                let naive_full = naive_full_correlation(&signal, &template);
+                let fft_full = fft_correlate_1d(&signal, &template, Mode::Full).unwrap();
+
+                assert_eq!(fft_full.len(), naive_full.len(), "Full length mismatch for signal {} template {}", signal_len, template_len);
+                for (idx, (expected, actual)) in naive_full.iter().zip(fft_full.iter()).enumerate() {
+                    assert!(
+                        (expected - actual).abs() < 1e-4,
+                        "Full mode mismatch at {} for signal {} template {}: expected {}, got {}",
+                        idx,
+                        signal_len,
+                        template_len,
+                        expected,
+                        actual
+                    );
+                }
+
+                let fft_same = fft_correlate_1d(&signal, &template, Mode::Same).unwrap();
+                let same_start = (naive_full.len() - signal.len()) / 2;
+                let expected_same = &naive_full[same_start..same_start + signal.len()];
+                assert_eq!(fft_same.len(), expected_same.len(), "Same length mismatch for signal {} template {}", signal_len, template_len);
+                for (idx, (expected, actual)) in expected_same.iter().zip(fft_same.iter()).enumerate() {
+                    assert!(
+                        (expected - actual).abs() < 1e-4,
+                        "Same mode mismatch at {} for signal {} template {}: expected {}, got {}",
+                        idx,
+                        signal_len,
+                        template_len,
+                        expected,
+                        actual
+                    );
+                }
+
+                let fft_valid = fft_correlate_1d(&signal, &template, Mode::Valid).unwrap();
+                if signal.len() < template.len() {
+                    assert!(fft_valid.is_empty(), "Valid mode should be empty for signal {} template {}", signal_len, template_len);
+                } else {
+                    let valid_start = template.len() - 1;
+                    let valid_len = signal.len() - template.len() + 1;
+                    let expected_valid = &naive_full[valid_start..valid_start + valid_len];
+                    assert_eq!(fft_valid.len(), expected_valid.len(), "Valid length mismatch for signal {} template {}", signal_len, template_len);
+                    for (idx, (expected, actual)) in expected_valid.iter().zip(fft_valid.iter()).enumerate() {
+                        assert!(
+                            (expected - actual).abs() < 1e-4,
+                            "Valid mode mismatch at {} for signal {} template {}: expected {}, got {}",
+                            idx,
+                            signal_len,
+                            template_len,
+                            expected,
+                            actual
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_fft_correlate_thread_safety_consistency() {
+        use std::thread;
+
+        let signal: Vec<f32> = (0..128)
+            .map(|i| ((i as f32) * 0.05).sin())
+            .collect();
+        let template: Vec<f32> = (0..32)
+            .map(|i| ((i as f32) * 0.2).cos())
+            .collect();
+
+        let expected = fft_correlate_1d(&signal, &template, Mode::Same).unwrap();
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let signal = signal.clone();
+                let template = template.clone();
+                thread::spawn(move || fft_correlate_1d(&signal, &template, Mode::Same).unwrap())
+            })
+            .collect();
+
+        for (idx, handle) in handles.into_iter().enumerate() {
+            let result = handle.join().expect("thread panicked");
+            assert_eq!(result.len(), expected.len(), "Length mismatch in thread {}", idx);
+            for (exp, got) in expected.iter().zip(result.iter()) {
+                assert!((exp - got).abs() < 1e-4, "Value mismatch in thread {}", idx);
+            }
+        }
     }
 }
