@@ -26,7 +26,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fft-correlation = "0.1.0"
+fft-correlation = { git = "https://github.com/andrewtheguy/fft-correlation", tag = "0.1.0" }
 ```
 
 ## Usage
