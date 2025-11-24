@@ -91,7 +91,7 @@ The library uses thread-local FFT planner caching to avoid repeated planning ove
 
 - Time complexity: O((N+M) log(N+M))
 - Space complexity: O(N+M)
-- Naive sliding window: O(N�M)
+Naive sliding window: O(N*M)
 
 For large signals or templates, FFT-based correlation is significantly faster than direct convolution.
 
