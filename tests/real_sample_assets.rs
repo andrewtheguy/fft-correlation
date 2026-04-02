@@ -106,17 +106,19 @@ fn read_pcm16_mono_wav(path: &Path) -> WavData {
 
 fn strongest_match_start(signal: &[f32], template: &[f32]) -> usize {
     let correlation = fft_correlate_1d(signal, template, Mode::Full).unwrap();
+    let lag_offset = template.len().saturating_sub(1);
     let peak_index = correlation
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
         .map(|(idx, _)| idx)
         .unwrap();
-    peak_index - (template.len() - 1)
+    peak_index.saturating_sub(lag_offset)
 }
 
 fn strongest_match_starts(signal: &[f32], template: &[f32], count: usize) -> Vec<usize> {
     let mut correlation = fft_correlate_1d(signal, template, Mode::Full).unwrap();
+    let lag_offset = template.len().saturating_sub(1);
     let suppression_radius = template.len().max(1);
     let mut starts = Vec::with_capacity(count);
 
@@ -127,7 +129,7 @@ fn strongest_match_starts(signal: &[f32], template: &[f32], count: usize) -> Vec
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .map(|(idx, _)| idx)
             .unwrap();
-        starts.push(peak_index - (template.len() - 1));
+        starts.push(peak_index.saturating_sub(lag_offset));
 
         let suppress_start = peak_index.saturating_sub(suppression_radius);
         let suppress_end = (peak_index + suppression_radius + 1).min(correlation.len());
