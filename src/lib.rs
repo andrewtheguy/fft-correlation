@@ -28,6 +28,9 @@ use std::{cell::RefCell, collections::VecDeque, sync::Arc};
 pub mod error;
 pub use error::{FftCorrelationError, Result};
 
+#[cfg(feature = "python")]
+mod python;
+
 const FFT_PLAN_CACHE_CAPACITY: usize = 8;
 
 struct CachedFftPlans {
