@@ -1,7 +1,7 @@
 //! FFT-based correlation for 1D real-valued signals
 //!
 //! Provides efficient cross-correlation using FFT with configurable output modes (Full, Same, Valid)
-//! matching scipy/numpy conventions. Uses thread-local FFT planner caching for optimal performance.
+//! matching scipy/numpy conventions. Uses a bounded thread-local FFT plan cache for optimal performance.
 //!
 //! # Mode Semantics and Indexing
 //!
@@ -22,15 +22,76 @@
 //! - scipy.signal.correlate: https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.correlate.html
 //! - numpy.correlate: https://numpy.org/doc/stable/reference/generated/numpy.correlate.html
 
-use realfft::RealFftPlanner;
-use std::cell::RefCell;
+use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
+use std::{cell::RefCell, collections::VecDeque, sync::Arc};
 
 pub mod error;
 pub use error::{FftCorrelationError, Result};
 
-// Thread-local FFT planner cache for optimal performance
+const FFT_PLAN_CACHE_CAPACITY: usize = 8;
+
+struct CachedFftPlans {
+    fft_size: usize,
+    r2c: Arc<dyn RealToComplex<f32>>,
+    c2r: Arc<dyn ComplexToReal<f32>>,
+}
+
+struct BoundedFftPlanCache {
+    entries: VecDeque<CachedFftPlans>,
+}
+
+impl BoundedFftPlanCache {
+    fn new() -> Self {
+        Self {
+            entries: VecDeque::with_capacity(FFT_PLAN_CACHE_CAPACITY),
+        }
+    }
+
+    fn get_or_insert(
+        &mut self,
+        fft_size: usize,
+    ) -> (Arc<dyn RealToComplex<f32>>, Arc<dyn ComplexToReal<f32>>) {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.fft_size == fft_size)
+        {
+            let entry = self
+                .entries
+                .remove(index)
+                .expect("cache entry should exist at the located index");
+            let r2c = Arc::clone(&entry.r2c);
+            let c2r = Arc::clone(&entry.c2r);
+            self.entries.push_front(entry);
+            return (r2c, c2r);
+        }
+
+        // Use a fresh planner per cache miss so planner-internal maps do not grow unbounded.
+        let mut planner = RealFftPlanner::new();
+        let r2c = planner.plan_fft_forward(fft_size);
+        let c2r = planner.plan_fft_inverse(fft_size);
+
+        if self.entries.len() == FFT_PLAN_CACHE_CAPACITY {
+            self.entries.pop_back();
+        }
+
+        self.entries.push_front(CachedFftPlans {
+            fft_size,
+            r2c: Arc::clone(&r2c),
+            c2r: Arc::clone(&c2r),
+        });
+
+        (r2c, c2r)
+    }
+}
+
+// Thread-local bounded FFT plan cache for optimal performance
 thread_local! {
-    static FFT_PLANNER: RefCell<RealFftPlanner<f32>> = RefCell::new(RealFftPlanner::new());
+    static FFT_PLAN_CACHE: RefCell<BoundedFftPlanCache> = RefCell::new(BoundedFftPlanCache::new());
+}
+
+fn get_fft_plans(fft_size: usize) -> (Arc<dyn RealToComplex<f32>>, Arc<dyn ComplexToReal<f32>>) {
+    FFT_PLAN_CACHE.with(|cache_cell| cache_cell.borrow_mut().get_or_insert(fft_size))
 }
 
 /// Output mode for correlation, matching scipy/numpy conventions
@@ -124,14 +185,8 @@ pub fn fft_correlate_1d(signal: &[f32], template: &[f32], mode: Mode) -> Result<
         padded_template[i] = val;
     }
 
-    // Get plans from thread-local cached planner
-    // RealFftPlanner caches FFT plans internally, so reusing it avoids repeated planning
-    let (r2c, c2r) = FFT_PLANNER.with(|planner_cell| {
-        let mut planner = planner_cell.borrow_mut();
-        let r2c = planner.plan_fft_forward(fft_size);
-        let c2r = planner.plan_fft_inverse(fft_size);
-        (r2c, c2r)
-    });
+    // Reuse a bounded per-thread cache of FFT plans keyed by size.
+    let (r2c, c2r) = get_fft_plans(fft_size);
 
     // Allocate buffers for FFT output (complex)
     let mut signal_spectrum = r2c.make_output_vec();
@@ -237,6 +292,36 @@ mod tests {
         let template = vec![1.0; 10];
         let result = fft_correlate_1d(&signal, &template, Mode::Full).unwrap();
         assert_eq!(result.len(), 109);
+    }
+
+    #[test]
+    fn test_fft_plan_cache_is_bounded() {
+        FFT_PLAN_CACHE.with(|cache_cell| {
+            let mut cache = cache_cell.borrow_mut();
+            cache.entries.clear();
+
+            for power in 3..(3 + FFT_PLAN_CACHE_CAPACITY + 2) {
+                let fft_size = 1usize << power;
+                let _ = cache.get_or_insert(fft_size);
+            }
+
+            let cached_sizes: Vec<_> = cache.entries.iter().map(|entry| entry.fft_size).collect();
+
+            assert_eq!(cached_sizes.len(), FFT_PLAN_CACHE_CAPACITY);
+            assert_eq!(
+                cached_sizes[0],
+                1usize << (3 + FFT_PLAN_CACHE_CAPACITY + 1),
+                "most recently inserted size should be kept"
+            );
+            assert!(
+                !cached_sizes.contains(&(1usize << 3)),
+                "oldest size should be evicted first"
+            );
+            assert!(
+                !cached_sizes.contains(&(1usize << 4)),
+                "second-oldest size should be evicted once capacity is exceeded twice"
+            );
+        });
     }
 
     #[test]
