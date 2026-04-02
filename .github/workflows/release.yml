@@ -41,6 +41,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           python - <<'PY'
+          import os
           import pathlib
           import re
           import sys
@@ -48,7 +49,7 @@ jobs:
           root = pathlib.Path(".")
           cargo = (root / "Cargo.toml").read_text()
           pyproject = (root / "pyproject.toml").read_text()
-          release_tag = pathlib.os.environ["RELEASE_TAG"]
+          release_tag = os.environ["RELEASE_TAG"]
           normalized_tag = release_tag[1:] if release_tag.startswith("v") else release_tag
 
           cargo_match = re.search(r'^version = "([^"]+)"$', cargo, re.MULTILINE)
