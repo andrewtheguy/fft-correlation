@@ -1,6 +1,6 @@
 [package]
 name = "fft-correlation"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 
 [lib]
@@ -9,8 +9,9 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = []
-python = ["dep:pyo3", "pyo3/extension-module"]
+python = ["dep:pyo3", "pyo3/extension-module", "dep:numpy"]
 
 [dependencies]
 realfft = "3.5"
-pyo3 = { version = "0.27.2", optional = true, features = ["abi3-py38"] }
+pyo3 = { version = "0.27.2", optional = true, features = ["abi3-py39"] }
+numpy = { version = "0.27.1", optional = true }

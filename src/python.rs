@@ -1,4 +1,5 @@
 use crate::{fft_correlate_1d as rust_fft_correlate_1d, Mode};
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::{
     exceptions::{PyRuntimeError, PyValueError},
     prelude::*,
@@ -19,10 +20,24 @@ fn parse_mode(mode: &str) -> PyResult<Mode> {
 }
 
 #[pyfunction(name = "fft_correlate_1d", signature = (signal, template, mode = "full"))]
-fn fft_correlate_1d_py(signal: Vec<f32>, template: Vec<f32>, mode: &str) -> PyResult<Vec<f32>> {
+fn fft_correlate_1d_py<'py>(
+    py: Python<'py>,
+    signal: PyReadonlyArray1<'py, f32>,
+    template: PyReadonlyArray1<'py, f32>,
+    mode: &str,
+) -> PyResult<Bound<'py, PyArray1<f32>>> {
     let mode = parse_mode(mode)?;
-    rust_fft_correlate_1d(&signal, &template, mode)
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))
+    let signal = signal.as_slice().map_err(|_| {
+        PyValueError::new_err("signal must be a contiguous 1D numpy.ndarray with dtype float32")
+    })?;
+    let template = template.as_slice().map_err(|_| {
+        PyValueError::new_err("template must be a contiguous 1D numpy.ndarray with dtype float32")
+    })?;
+
+    let result = rust_fft_correlate_1d(signal, template, mode)
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+
+    Ok(result.into_pyarray(py))
 }
 
 #[pymodule]
