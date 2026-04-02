@@ -1,7 +1,7 @@
 //! FFT-based correlation for 1D real-valued signals
 //!
 //! Provides efficient cross-correlation using FFT with configurable output modes (Full, Same, Valid)
-//! matching scipy/numpy conventions. Uses thread-local FFT planner caching for optimal performance.
+//! matching scipy/numpy conventions. Uses a bounded thread-local FFT plan cache for optimal performance.
 //!
 //! # Mode Semantics and Indexing
 //!
@@ -22,15 +22,76 @@
 //! - scipy.signal.correlate: https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.correlate.html
 //! - numpy.correlate: https://numpy.org/doc/stable/reference/generated/numpy.correlate.html
 
-use realfft::RealFftPlanner;
-use std::cell::RefCell;
+use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
+use std::{cell::RefCell, collections::VecDeque, sync::Arc};
 
 pub mod error;
 pub use error::{FftCorrelationError, Result};
 
-// Thread-local FFT planner cache for optimal performance
+const FFT_PLAN_CACHE_CAPACITY: usize = 8;
+
+struct CachedFftPlans {
+    fft_size: usize,
+    r2c: Arc<dyn RealToComplex<f32>>,
+    c2r: Arc<dyn ComplexToReal<f32>>,
+}
+
+struct BoundedFftPlanCache {
+    entries: VecDeque<CachedFftPlans>,
+}
+
+impl BoundedFftPlanCache {
+    fn new() -> Self {
+        Self {
+            entries: VecDeque::with_capacity(FFT_PLAN_CACHE_CAPACITY),
+        }
+    }
+
+    fn get_or_insert(
+        &mut self,
+        fft_size: usize,
+    ) -> (Arc<dyn RealToComplex<f32>>, Arc<dyn ComplexToReal<f32>>) {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.fft_size == fft_size)
+        {
+            let entry = self
+                .entries
+                .remove(index)
+                .expect("cache entry should exist at the located index");
+            let r2c = Arc::clone(&entry.r2c);
+            let c2r = Arc::clone(&entry.c2r);
+            self.entries.push_front(entry);
+            return (r2c, c2r);
+        }
+
+        // Use a fresh planner per cache miss so planner-internal maps do not grow unbounded.
+        let mut planner = RealFftPlanner::new();
+        let r2c = planner.plan_fft_forward(fft_size);
+        let c2r = planner.plan_fft_inverse(fft_size);
+
+        if self.entries.len() == FFT_PLAN_CACHE_CAPACITY {
+            self.entries.pop_back();
+        }
+
+        self.entries.push_front(CachedFftPlans {
+            fft_size,
+            r2c: Arc::clone(&r2c),
+            c2r: Arc::clone(&c2r),
+        });
+
+        (r2c, c2r)
+    }
+}
+
+// Thread-local bounded FFT plan cache for optimal performance
 thread_local! {
-    static FFT_PLANNER: RefCell<RealFftPlanner<f32>> = RefCell::new(RealFftPlanner::new());
+    static FFT_PLAN_CACHE: RefCell<BoundedFftPlanCache> = RefCell::new(BoundedFftPlanCache::new());
+}
+
+fn get_fft_plans(fft_size: usize) -> (Arc<dyn RealToComplex<f32>>, Arc<dyn ComplexToReal<f32>>) {
+    FFT_PLAN_CACHE.with(|cache_cell| cache_cell.borrow_mut().get_or_insert(fft_size))
 }
 
 /// Output mode for correlation, matching scipy/numpy conventions
@@ -63,7 +124,6 @@ pub enum Mode {
     /// Only fully-overlapping region (signal.len() - template.len() + 1 samples)
     Valid,
 }
-
 
 /// Correlate two 1D signals using FFT
 ///
@@ -98,6 +158,16 @@ pub fn fft_correlate_1d(signal: &[f32], template: &[f32], mode: Mode) -> Result<
     }
 
     let output_len = signal.len() + template.len() - 1;
+    let (trim_start, trim_len) = match mode {
+        Mode::Full => (0, output_len),
+        Mode::Same => ((output_len - signal.len()) / 2, signal.len()),
+        Mode::Valid => {
+            if signal.len() < template.len() {
+                return Ok(Vec::new());
+            }
+            (template.len() - 1, signal.len() - template.len() + 1)
+        }
+    };
     let fft_size = output_len.next_power_of_two();
 
     // Zero-pad both signal and template to fft_size
@@ -115,26 +185,43 @@ pub fn fft_correlate_1d(signal: &[f32], template: &[f32], mode: Mode) -> Result<
         padded_template[i] = val;
     }
 
-    // Get plans from thread-local cached planner
-    // RealFftPlanner caches FFT plans internally, so reusing it avoids repeated planning
-    let (r2c, c2r) = FFT_PLANNER.with(|planner_cell| {
-        let mut planner = planner_cell.borrow_mut();
-        let r2c = planner.plan_fft_forward(fft_size);
-        let c2r = planner.plan_fft_inverse(fft_size);
-        (r2c, c2r)
-    });
+    // Reuse a bounded per-thread cache of FFT plans keyed by size.
+    let (r2c, c2r) = get_fft_plans(fft_size);
 
     // Allocate buffers for FFT output (complex)
     let mut signal_spectrum = r2c.make_output_vec();
     let mut template_spectrum = r2c.make_output_vec();
+    let mut forward_scratch = r2c.make_scratch_vec();
 
     // Forward FFT on both signal and template
     debug_assert_eq!(padded_signal.len(), fft_size, "Signal buffer size mismatch");
-    debug_assert_eq!(padded_template.len(), fft_size, "Template buffer size mismatch");
-    r2c.process(&mut padded_signal, &mut signal_spectrum)
-        .map_err(|e| FftCorrelationError::FftProcessing(format!("FFT forward process failed for signal: {:?}", e)))?;
-    r2c.process(&mut padded_template, &mut template_spectrum)
-        .map_err(|e| FftCorrelationError::FftProcessing(format!("FFT forward process failed for template: {:?}", e)))?;
+    debug_assert_eq!(
+        padded_template.len(),
+        fft_size,
+        "Template buffer size mismatch"
+    );
+    r2c.process_with_scratch(
+        &mut padded_signal,
+        &mut signal_spectrum,
+        &mut forward_scratch,
+    )
+    .map_err(|e| {
+        FftCorrelationError::FftProcessing(format!(
+            "FFT forward process failed for signal: {:?}",
+            e
+        ))
+    })?;
+    r2c.process_with_scratch(
+        &mut padded_template,
+        &mut template_spectrum,
+        &mut forward_scratch,
+    )
+    .map_err(|e| {
+        FftCorrelationError::FftProcessing(format!(
+            "FFT forward process failed for template: {:?}",
+            e
+        ))
+    })?;
 
     // Frequency domain multiplication (element-wise)
     // For correlation, we already reversed template, so just multiply in-place
@@ -143,35 +230,32 @@ pub fn fft_correlate_1d(signal: &[f32], template: &[f32], mode: Mode) -> Result<
     }
 
     // Inverse FFT
-    let mut result_time = vec![0.0; fft_size];
-    debug_assert_eq!(signal_spectrum.len(), r2c.make_output_vec().len(), "Spectrum buffer size mismatch");
+    let mut result_time = c2r.make_output_vec();
+    let mut inverse_scratch = c2r.make_scratch_vec();
+    debug_assert_eq!(
+        signal_spectrum.len(),
+        r2c.complex_len(),
+        "Spectrum buffer size mismatch"
+    );
     debug_assert_eq!(result_time.len(), fft_size, "Output buffer size mismatch");
-    c2r.process(&mut signal_spectrum, &mut result_time)
-        .map_err(|e| FftCorrelationError::FftProcessing(format!("FFT inverse process failed: {:?}", e)))?;
+    c2r.process_with_scratch(&mut signal_spectrum, &mut result_time, &mut inverse_scratch)
+        .map_err(|e| {
+            FftCorrelationError::FftProcessing(format!("FFT inverse process failed: {:?}", e))
+        })?;
 
-    // Normalize by FFT size
-    let normalization = fft_size as f32;
-    result_time.iter_mut().for_each(|x| *x /= normalization);
+    // Normalize only the output window we will keep.
+    let trim_end = trim_start + trim_len;
+    let normalization = 1.0 / fft_size as f32;
+    result_time[trim_start..trim_end]
+        .iter_mut()
+        .for_each(|x| *x *= normalization);
 
-    // Mode-based output trimming
-    match mode {
-        Mode::Full => {
-            result_time.truncate(output_len);
-            Ok(result_time)
-        }
-        Mode::Same => {
-            let start = (output_len - signal.len()) / 2;
-            Ok(result_time[start..start + signal.len()].to_vec())
-        }
-        Mode::Valid => {
-            if signal.len() < template.len() {
-                return Ok(Vec::new());
-            }
-            let valid_len = signal.len() - template.len() + 1;
-            let start = template.len() - 1;
-            Ok(result_time[start..start + valid_len].to_vec())
-        }
+    if trim_start > 0 {
+        result_time.copy_within(trim_start..trim_end, 0);
     }
+
+    result_time.truncate(trim_len);
+    Ok(result_time)
 }
 
 #[cfg(test)]
@@ -208,6 +292,36 @@ mod tests {
         let template = vec![1.0; 10];
         let result = fft_correlate_1d(&signal, &template, Mode::Full).unwrap();
         assert_eq!(result.len(), 109);
+    }
+
+    #[test]
+    fn test_fft_plan_cache_is_bounded() {
+        FFT_PLAN_CACHE.with(|cache_cell| {
+            let mut cache = cache_cell.borrow_mut();
+            cache.entries.clear();
+
+            for power in 3..(3 + FFT_PLAN_CACHE_CAPACITY + 2) {
+                let fft_size = 1usize << power;
+                let _ = cache.get_or_insert(fft_size);
+            }
+
+            let cached_sizes: Vec<_> = cache.entries.iter().map(|entry| entry.fft_size).collect();
+
+            assert_eq!(cached_sizes.len(), FFT_PLAN_CACHE_CAPACITY);
+            assert_eq!(
+                cached_sizes[0],
+                1usize << (3 + FFT_PLAN_CACHE_CAPACITY + 1),
+                "most recently inserted size should be kept"
+            );
+            assert!(
+                !cached_sizes.contains(&(1usize << 3)),
+                "oldest size should be evicted first"
+            );
+            assert!(
+                !cached_sizes.contains(&(1usize << 4)),
+                "second-oldest size should be evicted once capacity is exceeded twice"
+            );
+        });
     }
 
     #[test]
@@ -287,7 +401,8 @@ mod tests {
         assert_eq!(valid_result.len(), 5);
 
         // Check that peak is in the center where template fully overlaps with signal
-        let max_idx = valid_result.iter()
+        let max_idx = valid_result
+            .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .map(|(i, _)| i)
@@ -328,9 +443,16 @@ mod tests {
         let sliding_result = naive_full_correlation(&signal, &template);
 
         assert_eq!(fft_result.len(), sliding_result.len());
-        for (i, (&fft_val, &sliding_val)) in fft_result.iter().zip(sliding_result.iter()).enumerate() {
-            assert!((fft_val - sliding_val).abs() < 1e-4,
-                "Sample {} mismatch: FFT={}, sliding={}", i, fft_val, sliding_val);
+        for (i, (&fft_val, &sliding_val)) in
+            fft_result.iter().zip(sliding_result.iter()).enumerate()
+        {
+            assert!(
+                (fft_val - sliding_val).abs() < 1e-4,
+                "Sample {} mismatch: FFT={}, sliding={}",
+                i,
+                fft_val,
+                sliding_val
+            );
         }
     }
 
@@ -363,9 +485,21 @@ mod tests {
         let valid = fft_correlate_1d(&signal, &template, Mode::Valid).unwrap();
 
         // All should find peak
-        let full_peak = full.iter().map(|x| x.abs()).max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
-        let same_peak = same.iter().map(|x| x.abs()).max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
-        let valid_peak = valid.iter().map(|x| x.abs()).max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
+        let full_peak = full
+            .iter()
+            .map(|x| x.abs())
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        let same_peak = same
+            .iter()
+            .map(|x| x.abs())
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        let valid_peak = valid
+            .iter()
+            .map(|x| x.abs())
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
 
         assert!(full_peak > 100.0);
         assert!(same_peak > 100.0);
@@ -422,8 +556,13 @@ mod tests {
         let result_yx_rev: Vec<f32> = result_yx.iter().rev().cloned().collect();
         // Due to the way correlation is defined, they should match within tolerance
         for (i, (&val_xy, val_yx_rev)) in result_xy.iter().zip(result_yx_rev.iter()).enumerate() {
-            assert!((val_xy - val_yx_rev).abs() < 1e-4,
-                "Mismatch at index {}: {} vs {}", i, val_xy, val_yx_rev);
+            assert!(
+                (val_xy - val_yx_rev).abs() < 1e-4,
+                "Mismatch at index {}: {} vs {}",
+                i,
+                val_xy,
+                val_yx_rev
+            );
         }
     }
 
@@ -465,7 +604,8 @@ mod tests {
 
         let result = fft_correlate_1d(&signal, &template, Mode::Full).unwrap();
 
-        let max_val = result.iter()
+        let max_val = result
+            .iter()
             .map(|x| x.abs())
             .max_by(|a, b| a.partial_cmp(b).unwrap())
             .unwrap();
@@ -556,8 +696,16 @@ mod tests {
         }
 
         // Verify peak value is reasonable (should be within reasonable bounds for sine wave correlation)
-        let max_abs = fft_result.iter().map(|x| x.abs()).max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
-        assert!(max_abs < 100.0, "Peak value should be reasonable for sine wave, got {}", max_abs);
+        let max_abs = fft_result
+            .iter()
+            .map(|x| x.abs())
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        assert!(
+            max_abs < 100.0,
+            "Peak value should be reasonable for sine wave, got {}",
+            max_abs
+        );
     }
 
     #[test]
@@ -590,13 +738,16 @@ mod tests {
 
         // Test signal with one very large value (avoiding NaN/Inf which break FFT)
         let mut signal = vec![1.0; 10];
-        signal[5] = 1e10;  // Use large value instead of NaN (NaN breaks FFT validation)
+        signal[5] = 1e10; // Use large value instead of NaN (NaN breaks FFT validation)
         let template = vec![0.5; 3];
 
         let result = fft_correlate_1d(&signal, &template, Mode::Full).unwrap();
 
         // Result should preserve large values
-        assert!(result.iter().any(|x| *x > 1e8), "Large values should be present in correlation");
+        assert!(
+            result.iter().any(|x| *x > 1e8),
+            "Large values should be present in correlation"
+        );
 
         // Test with negative values
         let mut signal = vec![1.0; 10];
@@ -606,7 +757,10 @@ mod tests {
         let result = fft_correlate_1d(&signal, &template, Mode::Full).unwrap();
 
         // Result should contain the effect of negative values
-        assert!(result.iter().any(|x| *x < 0.0), "Negative values should propagate through correlation");
+        assert!(
+            result.iter().any(|x| *x < 0.0),
+            "Negative values should propagate through correlation"
+        );
     }
 
     #[test]
@@ -614,8 +768,8 @@ mod tests {
         // Comment 6: Test Mode::Same centering when template is even (ambiguous center)
         // Verify left-biased centering for consistent alignment
 
-        let signal = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];  // length 6
-        let template = vec![0.5, 1.0, 1.5, 2.0];  // length 4 (even)
+        let signal = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // length 6
+        let template = vec![0.5, 1.0, 1.5, 2.0]; // length 4 (even)
 
         let full = fft_correlate_1d(&signal, &template, Mode::Full).unwrap();
         let same = fft_correlate_1d(&signal, &template, Mode::Same).unwrap();
@@ -628,8 +782,12 @@ mod tests {
         let start = (output_len - signal.len()) / 2;
 
         for (i, &val) in same.iter().enumerate() {
-            assert!((val - full[start + i]).abs() < 1e-4,
-                "Same mode index {} should match Full mode index {}", i, start + i);
+            assert!(
+                (val - full[start + i]).abs() < 1e-4,
+                "Same mode index {} should match Full mode index {}",
+                i,
+                start + i
+            );
         }
     }
 
@@ -651,11 +809,21 @@ mod tests {
         let sum_sq: f32 = signal.iter().map(|x| x * x).sum();
         let peak = autocorr[n - 1]; // lag 0 is at index n - 1 in Full mode
 
-        assert!((peak - sum_sq).abs() < 0.1, "Autocorr peak {} should equal sum_sq {}", peak, sum_sq);
+        assert!(
+            (peak - sum_sq).abs() < 0.1,
+            "Autocorr peak {} should equal sum_sq {}",
+            peak,
+            sum_sq
+        );
 
         // Peak should be maximum
         for val in &autocorr {
-            assert!(*val <= peak + 1e-4, "Autocorr value {} exceeds peak {}", val, peak);
+            assert!(
+                *val <= peak + 1e-4,
+                "Autocorr value {} exceeds peak {}",
+                val,
+                peak
+            );
         }
 
         // Test Same mode autocorrelation
@@ -663,14 +831,18 @@ mod tests {
         assert_eq!(same_result.len(), n);
 
         // Same mode should have peak at center
-        let same_peak_idx = same_result.iter()
+        let same_peak_idx = same_result
+            .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .map(|(i, _)| i)
             .unwrap();
 
-        assert!(same_peak_idx >= n / 2 - 2 && same_peak_idx <= n / 2 + 2,
-            "Same mode peak should be near center, got index {}", same_peak_idx);
+        assert!(
+            same_peak_idx >= n / 2 - 2 && same_peak_idx <= n / 2 + 2,
+            "Same mode peak should be near center, got index {}",
+            same_peak_idx
+        );
     }
 
     #[test]
@@ -687,8 +859,15 @@ mod tests {
                 let naive_full = naive_full_correlation(&signal, &template);
                 let fft_full = fft_correlate_1d(&signal, &template, Mode::Full).unwrap();
 
-                assert_eq!(fft_full.len(), naive_full.len(), "Full length mismatch for signal {} template {}", signal_len, template_len);
-                for (idx, (expected, actual)) in naive_full.iter().zip(fft_full.iter()).enumerate() {
+                assert_eq!(
+                    fft_full.len(),
+                    naive_full.len(),
+                    "Full length mismatch for signal {} template {}",
+                    signal_len,
+                    template_len
+                );
+                for (idx, (expected, actual)) in naive_full.iter().zip(fft_full.iter()).enumerate()
+                {
                     assert!(
                         (expected - actual).abs() < 1e-4,
                         "Full mode mismatch at {} for signal {} template {}: expected {}, got {}",
@@ -703,8 +882,16 @@ mod tests {
                 let fft_same = fft_correlate_1d(&signal, &template, Mode::Same).unwrap();
                 let same_start = (naive_full.len() - signal.len()) / 2;
                 let expected_same = &naive_full[same_start..same_start + signal.len()];
-                assert_eq!(fft_same.len(), expected_same.len(), "Same length mismatch for signal {} template {}", signal_len, template_len);
-                for (idx, (expected, actual)) in expected_same.iter().zip(fft_same.iter()).enumerate() {
+                assert_eq!(
+                    fft_same.len(),
+                    expected_same.len(),
+                    "Same length mismatch for signal {} template {}",
+                    signal_len,
+                    template_len
+                );
+                for (idx, (expected, actual)) in
+                    expected_same.iter().zip(fft_same.iter()).enumerate()
+                {
                     assert!(
                         (expected - actual).abs() < 1e-4,
                         "Same mode mismatch at {} for signal {} template {}: expected {}, got {}",
@@ -718,13 +905,26 @@ mod tests {
 
                 let fft_valid = fft_correlate_1d(&signal, &template, Mode::Valid).unwrap();
                 if signal.len() < template.len() {
-                    assert!(fft_valid.is_empty(), "Valid mode should be empty for signal {} template {}", signal_len, template_len);
+                    assert!(
+                        fft_valid.is_empty(),
+                        "Valid mode should be empty for signal {} template {}",
+                        signal_len,
+                        template_len
+                    );
                 } else {
                     let valid_start = template.len() - 1;
                     let valid_len = signal.len() - template.len() + 1;
                     let expected_valid = &naive_full[valid_start..valid_start + valid_len];
-                    assert_eq!(fft_valid.len(), expected_valid.len(), "Valid length mismatch for signal {} template {}", signal_len, template_len);
-                    for (idx, (expected, actual)) in expected_valid.iter().zip(fft_valid.iter()).enumerate() {
+                    assert_eq!(
+                        fft_valid.len(),
+                        expected_valid.len(),
+                        "Valid length mismatch for signal {} template {}",
+                        signal_len,
+                        template_len
+                    );
+                    for (idx, (expected, actual)) in
+                        expected_valid.iter().zip(fft_valid.iter()).enumerate()
+                    {
                         assert!(
                             (expected - actual).abs() < 1e-4,
                             "Valid mode mismatch at {} for signal {} template {}: expected {}, got {}",
@@ -744,12 +944,8 @@ mod tests {
     fn test_fft_correlate_thread_safety_consistency() {
         use std::thread;
 
-        let signal: Vec<f32> = (0..128)
-            .map(|i| ((i as f32) * 0.05).sin())
-            .collect();
-        let template: Vec<f32> = (0..32)
-            .map(|i| ((i as f32) * 0.2).cos())
-            .collect();
+        let signal: Vec<f32> = (0..128).map(|i| ((i as f32) * 0.05).sin()).collect();
+        let template: Vec<f32> = (0..32).map(|i| ((i as f32) * 0.2).cos()).collect();
 
         let expected = fft_correlate_1d(&signal, &template, Mode::Same).unwrap();
 
@@ -763,7 +959,12 @@ mod tests {
 
         for (idx, handle) in handles.into_iter().enumerate() {
             let result = handle.join().expect("thread panicked");
-            assert_eq!(result.len(), expected.len(), "Length mismatch in thread {}", idx);
+            assert_eq!(
+                result.len(),
+                expected.len(),
+                "Length mismatch in thread {}",
+                idx
+            );
             for (exp, got) in expected.iter().zip(result.iter()) {
                 assert!((exp - got).abs() < 1e-4, "Value mismatch in thread {}", idx);
             }
