@@ -22,6 +22,7 @@ A Rust library for efficient FFT-based cross-correlation of 1D real-valued signa
   - Optional PyO3 extension module
   - Buildable with `maturin`
   - Python API mirrors the Rust `fft_correlate_1d` entrypoint
+  - Ships a `.pyi` stub for Pyright and other type checkers
 
 - **Correct indexing**: Follows scipy.signal.correlate convention where output index k corresponds to the lag where `template[M-1]` aligns with `signal[k]`
 
