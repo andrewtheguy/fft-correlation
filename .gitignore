@@ -19,6 +19,10 @@ wasm/target
 .vscode-settings
 *.code-workspace
 
+# Python
+__pycache__/
+*.pyc
+
 # Node
 npm-debug.log
 yarn-error.log

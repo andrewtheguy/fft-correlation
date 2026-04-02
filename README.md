@@ -14,13 +14,20 @@ A Rust library for efficient FFT-based cross-correlation of 1D real-valued signa
   - `Valid`: Only fully-overlapping region (length = N - M + 1)
 
 - **High performance**:
-  - Thread-local FFT planner caching for optimal performance
+  - Bounded thread-local FFT plan caching for optimal performance
   - O(N log N) complexity vs O(N*M) for naive sliding window
   - Zero-copy where possible
+
+- **Python bindings**:
+  - Optional PyO3 extension module
+  - Buildable with `maturin`
+  - Python API mirrors the Rust `fft_correlate_1d` entrypoint
 
 - **Correct indexing**: Follows scipy.signal.correlate convention where output index k corresponds to the lag where `template[M-1]` aligns with `signal[k]`
 
 ## Installation
+
+### Rust
 
 Add this to your `Cargo.toml`:
 
@@ -29,7 +36,20 @@ Add this to your `Cargo.toml`:
 fft-correlation = { git = "https://github.com/andrewtheguy/fft-correlation", tag = "0.1.0" }
 ```
 
+### Python
+
+Build and install the extension module from this repository with `maturin`:
+
+```bash
+python -m pip install maturin
+maturin develop
+```
+
+That installs a module named `fft_correlation`.
+
 ## Usage
+
+### Rust
 
 ```rust
 use fft_correlation::{fft_correlate_1d, Mode};
@@ -46,6 +66,23 @@ let valid = fft_correlate_1d(&signal, &template, Mode::Valid).unwrap();
 println!("Full mode output length: {}", full.len());   // 7 = 5 + 3 - 1
 println!("Same mode output length: {}", same.len());   // 5 (matches signal)
 println!("Valid mode output length: {}", valid.len()); // 3 = 5 - 3 + 1
+```
+
+### Python
+
+```python
+import fft_correlation
+
+signal = [1.0, 2.0, 3.0, 4.0, 5.0]
+template = [1.0, 0.0, 0.0]
+
+full = fft_correlation.fft_correlate_1d(signal, template, mode="full")
+same = fft_correlation.fft_correlate_1d(signal, template, mode=fft_correlation.SAME)
+valid = fft_correlation.fft_correlate_1d(signal, template, mode="valid")
+
+print(len(full))   # 7
+print(len(same))   # 5
+print(len(valid))  # 3
 ```
 
 ### Finding peaks in signals
@@ -97,11 +134,28 @@ For large signals or templates, FFT-based correlation is significantly faster th
 
 ## Testing
 
-Run the test suite:
+### Rust
+
+Run the Rust test suite:
 
 ```bash
 cargo test
 ```
+
+### Python bindings
+
+The Python test loads the compiled extension module directly from `target/debug` or `target/release`, so you do not need to install a wheel just to verify the binding.
+
+Build the extension and run the Python test:
+
+```bash
+cargo build --features python --lib
+python3 -m unittest tests.test_python_bindings
+```
+
+If the extension lives somewhere else, point the test runner at it with `FFT_CORRELATION_PYTHON_MODULE=/path/to/module.so`.
+
+### Coverage
 
 The test suite includes:
 - Output length validation for all modes
@@ -109,6 +163,7 @@ The test suite includes:
 - Edge cases (empty inputs, single elements, template longer than signal)
 - Signal processing tests (chirp signals, sinusoids, autocorrelation)
 - Numerical accuracy tests
+- Python binding smoke coverage for exported constants, mode parsing, result correctness, and error translation
 
 ## References
 
