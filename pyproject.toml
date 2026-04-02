@@ -8,6 +8,7 @@ version = "0.0.1"
 description = "PyO3 bindings for FFT-based 1D correlation"
 readme = "README.md"
 requires-python = ">=3.8"
+dependencies = ["numpy>=1.16"]
 
 [tool.maturin]
 features = ["python"]

@@ -41,7 +41,7 @@ fft-correlation = { git = "https://github.com/andrewtheguy/fft-correlation", tag
 Build and install the extension module from this repository with `maturin`:
 
 ```bash
-python -m pip install maturin
+python -m pip install maturin numpy
 maturin develop
 ```
 
@@ -72,17 +72,18 @@ println!("Valid mode output length: {}", valid.len()); // 3 = 5 - 3 + 1
 
 ```python
 import fft_correlation
+import numpy as np
 
-signal = [1.0, 2.0, 3.0, 4.0, 5.0]
-template = [1.0, 0.0, 0.0]
+signal = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
+template = np.array([1.0, 0.0, 0.0], dtype=np.float32)
 
 full = fft_correlation.fft_correlate_1d(signal, template, mode="full")
 same = fft_correlation.fft_correlate_1d(signal, template, mode=fft_correlation.SAME)
 valid = fft_correlation.fft_correlate_1d(signal, template, mode="valid")
 
+print(type(full))  # numpy.ndarray
+print(full.dtype)  # float32
 print(len(full))   # 7
-print(len(same))   # 5
-print(len(valid))  # 3
 ```
 
 ### Finding peaks in signals
@@ -149,6 +150,7 @@ The Python test loads the compiled extension module directly from `target/debug`
 Build the extension and run the Python test:
 
 ```bash
+python3 -m pip install numpy
 cargo build --features python --lib
 python3 -m unittest tests.test_python_bindings
 ```

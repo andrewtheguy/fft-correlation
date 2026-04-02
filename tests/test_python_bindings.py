@@ -4,6 +4,8 @@ import os
 import pathlib
 import unittest
 
+import numpy as np
+
 
 def _repo_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[1]
@@ -78,19 +80,19 @@ class PythonBindingsTest(unittest.TestCase):
         self.assertEqual(self.fft_correlation.VALID, "valid")
 
     def test_fft_correlate_matches_naive_full(self):
-        signal = [1.0, -2.0, 3.5, 0.5]
-        template = [0.5, 1.5, -1.0]
+        signal = np.array([1.0, -2.0, 3.5, 0.5], dtype=np.float32)
+        template = np.array([0.5, 1.5, -1.0], dtype=np.float32)
 
-        expected = _naive_full_correlation(signal, template)
+        expected = np.array(_naive_full_correlation(signal, template), dtype=np.float32)
         actual = self.fft_correlation.fft_correlate_1d(signal, template, mode="full")
 
-        self.assertEqual(len(actual), len(expected))
-        for actual_value, expected_value in zip(actual, expected):
-            self.assertAlmostEqual(actual_value, expected_value, places=5)
+        self.assertIsInstance(actual, np.ndarray)
+        self.assertEqual(actual.dtype, np.float32)
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
 
     def test_fft_correlate_same_and_valid_lengths(self):
-        signal = [1.0, 2.0, 3.0, 4.0, 5.0]
-        template = [1.0, 0.0, 0.0]
+        signal = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
+        template = np.array([1.0, 0.0, 0.0], dtype=np.float32)
 
         same = self.fft_correlation.fft_correlate_1d(
             signal, template, mode=self.fft_correlation.SAME
@@ -103,16 +105,33 @@ class PythonBindingsTest(unittest.TestCase):
         self.assertAlmostEqual(valid[0], 1.0, places=5)
 
     def test_fft_correlate_empty_inputs(self):
-        self.assertEqual(self.fft_correlation.fft_correlate_1d([], [1.0]), [])
-        self.assertEqual(self.fft_correlation.fft_correlate_1d([1.0], []), [])
+        empty_signal = np.array([], dtype=np.float32)
+        one = np.array([1.0], dtype=np.float32)
+        np.testing.assert_array_equal(
+            self.fft_correlation.fft_correlate_1d(empty_signal, one),
+            np.array([], dtype=np.float32),
+        )
+        np.testing.assert_array_equal(
+            self.fft_correlation.fft_correlate_1d(one, empty_signal),
+            np.array([], dtype=np.float32),
+        )
 
     def test_invalid_mode_raises_value_error(self):
         with self.assertRaisesRegex(ValueError, "mode must be one of"):
-            self.fft_correlation.fft_correlate_1d([1.0], [1.0], mode="bogus")
+            one = np.array([1.0], dtype=np.float32)
+            self.fft_correlation.fft_correlate_1d(one, one, mode="bogus")
 
     def test_non_finite_values_raise_runtime_error(self):
         with self.assertRaisesRegex(RuntimeError, "FFT inverse process failed"):
-            self.fft_correlation.fft_correlate_1d([float("nan")], [1.0], mode="full")
+            self.fft_correlation.fft_correlate_1d(
+                np.array([float("nan")], dtype=np.float32),
+                np.array([1.0], dtype=np.float32),
+                mode="full",
+            )
+
+    def test_python_lists_are_no_longer_supported(self):
+        with self.assertRaises(TypeError):
+            self.fft_correlation.fft_correlate_1d([1.0], [1.0], mode="full")
 
 
 if __name__ == "__main__":
