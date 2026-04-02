@@ -1,3 +1,4 @@
+import importlib.machinery
 import importlib.util
 import os
 import pathlib
@@ -18,10 +19,17 @@ def _module_path() -> pathlib.Path:
             f"FFT_CORRELATION_PYTHON_MODULE points to a missing file: {path}"
         )
 
-    candidates = [
-        _repo_root() / "target" / "debug" / "libfft_correlation.so",
-        _repo_root() / "target" / "release" / "libfft_correlation.so",
-    ]
+    suffixes = list(importlib.machinery.EXTENSION_SUFFIXES)
+    for fallback_suffix in (".so", ".dylib", ".pyd", ".dll"):
+        if fallback_suffix not in suffixes:
+            suffixes.append(fallback_suffix)
+
+    candidates = []
+    for profile in ("debug", "release"):
+        target_dir = _repo_root() / "target" / profile
+        for stem in ("libfft_correlation", "fft_correlation"):
+            for suffix in suffixes:
+                candidates.append(target_dir / f"{stem}{suffix}")
 
     for path in candidates:
         if path.exists():
