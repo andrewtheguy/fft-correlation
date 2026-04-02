@@ -1,7 +1,15 @@
-name: Build Python Wheel
+name: Release Python Wheels
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to create, for example v0.0.1
+        required: true
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
   build-wheel:
@@ -42,3 +50,31 @@ jobs:
           name: python-wheel-${{ runner.os }}-${{ matrix.arch }}-py313
           path: dist/*.whl
           if-no-files-found: error
+
+  create-release:
+    needs: build-wheel
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: python-wheel-*
+          path: release-assets
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          mapfile -d '' assets < <(find release-assets -type f -name '*.whl' -print0 | sort -z)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No wheel assets found under release-assets" >&2
+            exit 1
+          fi
+
+          gh release create "$RELEASE_TAG" \
+            --title "$RELEASE_TAG" \
+            --generate-notes \
+            --target "${GITHUB_SHA}" \
+            "${assets[@]}"
