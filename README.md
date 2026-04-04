@@ -42,13 +42,13 @@ fft-correlation = { git = "https://github.com/andrewtheguy/fft-correlation", tag
 Install from the GitHub Pages package index:
 
 ```bash
-pip install --extra-index-url https://andrewtheguy.github.io/fft-correlation/simple/ fft-correlation
+pip install --extra-index-url https://andrewtheguy.github.io/fft-correlation/simple/ fft-correlation==0.0.0
 ```
 
 Or with `uv`:
 
 ```bash
-uv pip install --extra-index-url https://andrewtheguy.github.io/fft-correlation/simple/ fft-correlation
+uv pip install --extra-index-url https://andrewtheguy.github.io/fft-correlation/simple/ fft-correlation==0.0.0
 ```
 
 #### Development install
