@@ -39,7 +39,21 @@ fft-correlation = { git = "https://github.com/andrewtheguy/fft-correlation", tag
 
 ### Python
 
-Build and install the extension module from this repository with `maturin`:
+Install from the GitHub Pages package index:
+
+```bash
+pip install --extra-index-url https://andrewtheguy.github.io/fft-correlation/simple/ fft-correlation
+```
+
+Or with `uv`:
+
+```bash
+uv pip install --extra-index-url https://andrewtheguy.github.io/fft-correlation/simple/ fft-correlation
+```
+
+#### Development install
+
+To build and install the extension module from source with `maturin`:
 
 ```bash
 python -m pip install maturin numpy
