@@ -30,16 +30,16 @@ A Rust library for efficient FFT-based cross-correlation of 1D real-valued signa
 
 ### Rust
 
-Add this to your `Cargo.toml`:
+Add this to your `Cargo.toml` (replace tag with a github version):
 
 ```toml
 [dependencies]
-fft-correlation = { git = "https://github.com/andrewtheguy/fft-correlation", tag = "0.1.0" }
+fft-correlation = { git = "https://github.com/andrewtheguy/fft-correlation", tag = "0.0.0" }
 ```
 
 ### Python
 
-Install from the GitHub Pages package index:
+Install from the GitHub Pages package index (replace tag with a github version):
 
 ```bash
 pip install --extra-index-url https://andrewtheguy.github.io/fft-correlation/simple/ fft-correlation==0.0.0
