@@ -1,6 +1,6 @@
 [package]
 name = "fft-correlation"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2021"
 
 [lib]
@@ -13,5 +13,5 @@ python = ["dep:pyo3", "pyo3/extension-module", "dep:numpy"]
 
 [dependencies]
 realfft = "3.5"
-pyo3 = { version = "0.27.2", optional = true, features = ["abi3-py39"] }
-numpy = { version = "0.27.1", optional = true }
+pyo3 = { version = "0.28.0", optional = true, features = ["abi3-py39"] }
+numpy = { version = "0.28.0", optional = true }
