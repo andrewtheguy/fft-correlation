@@ -53,14 +53,14 @@ uv pip install --extra-index-url https://andrewtheguy.github.io/fft-correlation/
 
 #### Development install
 
-To build and install the extension module from source with `maturin`:
+For local development, use `uv` + `maturin develop --skip-install`. This rebuilds the native extension in place without re-running `pip install`, so you won't keep hitting a stale wheel between rebuilds:
 
 ```bash
-python -m pip install maturin numpy
-maturin develop
+uv sync
+uv run maturin develop --skip-install
 ```
 
-That installs a module named `fft_correlation`.
+That places a module named `fft_correlation` into the venv. Re-run `uv run maturin develop --skip-install` after any Rust source change.
 
 ## Usage
 
@@ -162,15 +162,21 @@ cargo test
 
 The Python test loads the compiled extension module directly from `target/debug` or `target/release`, so you do not need to install a wheel just to verify the binding.
 
-Build the extension and run the Python test:
+Build the extension and run the Python test with `uv`:
 
 ```bash
-python3 -m pip install numpy
-cargo build --features python --lib
-python3 -m unittest tests.test_python_bindings
+uv run maturin develop --skip-install
+uv run pytest tests/
 ```
 
-If the extension lives somewhere else, point the test runner at it with `FFT_CORRELATION_PYTHON_MODULE=/path/to/module.so`.
+Or, if you prefer not to touch the venv at all, build with `cargo` and load the `.so` directly out of `target/`:
+
+```bash
+cargo build --features python --lib
+uv run python -m unittest tests.test_python_bindings
+```
+
+The test harness (`tests/test_python_bindings.py`) searches `target/debug` and `target/release` for the extension, so no wheel install is required. If the extension lives somewhere else, point the test runner at it with `FFT_CORRELATION_PYTHON_MODULE=/path/to/module.so`.
 
 ### Coverage
 

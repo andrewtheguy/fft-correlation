@@ -10,5 +10,31 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["numpy>=1.26"]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.2.1,<9",
+    "ruff>=0.14.6",
+    "basedpyright>=1.29.0",
+]
+
 [tool.maturin]
 features = ["python"]
+
+[tool.pytest.ini_options]
+
+[tool.pyright]
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+    ".venv",
+    ".venv-np1",
+    ".venv-np2",
+    "build",
+    "dist",
+    "target",
+    "tmp",
+]
+reportMissingTypeStubs = false
+reportMissingImports = true
+reportMissingModuleSource = false
