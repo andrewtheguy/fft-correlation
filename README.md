@@ -101,7 +101,7 @@ let mut templates = vec![
 let mut workspace = CorrelationWorkspace::new();
 let mut output = Vec::new();
 for chunk in &chunks {
-    // The signal is transformed once per FFT size, however many templates follow.
+    // Consecutive templates needing the same FFT size share one transform of the signal.
     workspace.load_signal(chunk);
     for template in &mut templates {
         // Each template's spectrum is computed once per FFT size and then reused.
@@ -111,7 +111,7 @@ for chunk in &chunks {
 }
 ```
 
-The FFT size of each correlation depends only on that signal and template, so the output is bit-identical to `fft_correlate_1d` on the same pair. A template keeps its spectrum for the four most recent FFT sizes.
+The FFT size of each correlation depends only on that signal and template, so the output is bit-identical to `fft_correlate_1d` on the same pair. The workspace keeps the signal's spectrum for one FFT size at a time, so correlate templates of similar length consecutively (e.g. sorted by length) to avoid transforming the signal again. A template keeps its spectrum for the four most recent FFT sizes.
 
 ### Python
 

@@ -5,8 +5,8 @@
 //!
 //! [`fft_correlate_1d`] is the one-shot entry point. To correlate one signal against several
 //! templates, or the same templates against many signals, use [`CorrelationWorkspace`] with
-//! [`CorrelationTemplate`]: the signal is transformed once per FFT size, each template's spectrum
-//! is cached, and all FFT buffers are reused.
+//! [`CorrelationTemplate`]: consecutive templates needing the same FFT size share one transform
+//! of the signal, each template's spectrum is cached, and all FFT buffers are reused.
 //!
 //! # FFT Sizing
 //!
@@ -223,9 +223,11 @@ impl CorrelationTemplate {
 
 /// Reusable buffers for FFT cross-correlation of one signal against any number of templates.
 ///
-/// The signal is set by [`load_signal`] and transformed once per FFT size, so each [`correlate`]
-/// call with a template needing the same size costs a spectrum product and one inverse FFT.
-/// Buffers are kept between signals of the same FFT size.
+/// The signal is set by [`load_signal`] and its spectrum is kept for one FFT size at a time: a
+/// [`correlate`] call whose template needs the same size as the previous call costs a spectrum
+/// product and one inverse FFT, while a call needing a different size transforms the signal
+/// again. Correlate templates of similar length consecutively (e.g. sorted by length) so they
+/// share the transform. Buffers keep their capacity across signals and FFT sizes.
 ///
 /// The FFT size of a correlation depends only on the signal and that template, never on the
 /// other templates, so the result is bit-identical to [`fft_correlate_1d`] on the pair.
@@ -247,7 +249,7 @@ impl CorrelationTemplate {
 #[derive(Default)]
 pub struct CorrelationWorkspace {
     signal: Vec<f32>,
-    /// FFT size the buffers are allocated for (0 before the first transform).
+    /// FFT size the buffers are sized for (0 before the first transform).
     fft_size: usize,
     /// Whether `signal_spectrum` is the transform of `signal` at `fft_size`.
     spectrum_loaded: bool,
@@ -281,11 +283,14 @@ impl CorrelationWorkspace {
         if self.fft_size != fft_size || self.plans.is_none() {
             let plans = get_fft_plans(fft_size);
             let (r2c, c2r) = &plans;
-            self.signal_spectrum = r2c.make_output_vec();
-            self.product = r2c.make_output_vec();
-            self.forward_scratch = r2c.make_scratch_vec();
-            self.inverse_scratch = c2r.make_scratch_vec();
-            self.time_domain = c2r.make_output_vec();
+            // Resize instead of reallocating so capacity survives FFT-size switches. Every
+            // buffer is fully overwritten before it is read, so stale contents do not matter.
+            let zero = Complex::new(0.0, 0.0);
+            self.signal_spectrum.resize(r2c.complex_len(), zero);
+            self.product.resize(r2c.complex_len(), zero);
+            self.forward_scratch.resize(r2c.get_scratch_len(), zero);
+            self.inverse_scratch.resize(c2r.get_scratch_len(), zero);
+            self.time_domain.resize(c2r.len(), 0.0);
             self.plans = Some(plans);
             self.fft_size = fft_size;
         }
@@ -1209,6 +1214,54 @@ mod tests {
             cached_a.spectra.len(),
             2,
             "one cached spectrum per FFT size"
+        );
+    }
+
+    #[test]
+    fn test_workspace_buffers_keep_capacity_across_fft_sizes() {
+        let signal: Vec<f32> = (0..40)
+            .map(|i| ((i * 19 % 29) as f32 - 14.0) / 14.0)
+            .collect();
+        let short: Vec<f32> = (0..6).map(|i| ((i * 5 % 7) as f32 - 3.0) / 3.0).collect();
+        let long: Vec<f32> = (0..30)
+            .map(|i| ((i * 11 % 17) as f32 - 8.0) / 8.0)
+            .collect();
+
+        let mut workspace = CorrelationWorkspace::new();
+        let mut output = Vec::new();
+        workspace.load_signal(&signal);
+
+        // FFT size 72 for the long template, then 48 for the short one, then 72 again.
+        let mut buffers = Vec::new();
+        for template in [&long, &short, &long] {
+            workspace
+                .correlate(
+                    &mut CorrelationTemplate::new(template),
+                    Mode::Full,
+                    &mut output,
+                )
+                .unwrap();
+            assert_close(&output, &naive_full_correlation(&signal, template));
+            buffers.push((
+                workspace.fft_size,
+                workspace.signal_spectrum.len(),
+                workspace.time_domain.len(),
+                workspace.signal_spectrum.as_ptr(),
+                workspace.product.as_ptr(),
+                workspace.time_domain.as_ptr(),
+            ));
+        }
+
+        let sizes: Vec<(usize, usize, usize)> = buffers.iter().map(|b| (b.0, b.1, b.2)).collect();
+        assert_eq!(sizes, vec![(72, 37, 72), (48, 25, 48), (72, 37, 72)]);
+        // Shrinking and growing back stays within the first allocation.
+        assert_eq!(
+            (buffers[1].3, buffers[1].4, buffers[1].5),
+            (buffers[0].3, buffers[0].4, buffers[0].5)
+        );
+        assert_eq!(
+            (buffers[2].3, buffers[2].4, buffers[2].5),
+            (buffers[0].3, buffers[0].4, buffers[0].5)
         );
     }
 
