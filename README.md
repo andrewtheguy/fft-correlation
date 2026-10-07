@@ -15,6 +15,8 @@ A Rust library for efficient FFT-based cross-correlation of 1D real-valued signa
 
 - **High performance**:
   - Bounded thread-local FFT plan caching for optimal performance
+  - Reusable `CorrelationWorkspace` / `CorrelationTemplate` (Rust): one forward FFT per signal, cached template spectra, no per-call buffer allocation
+  - FFT sizes of the form `m * 2^k` (`m` in 1, 3, 5, 9, 15), at most 25% above the correlation length instead of up to 2x with a plain next power of two
   - O(N log N) complexity vs O(N*M) for naive sliding window
   - Zero-copy where possible
 
@@ -83,6 +85,34 @@ println!("Same mode output length: {}", same.len());   // 5 (matches signal)
 println!("Valid mode output length: {}", valid.len()); // 3 = 5 - 3 + 1
 ```
 
+### Many templates or many signals (Rust)
+
+`fft_correlate_1d` transforms the signal and the template on every call. When one signal is correlated against several templates, or the same templates against a stream of signals, use a `CorrelationWorkspace` with `CorrelationTemplate`s instead:
+
+```rust
+use fft_correlation::{CorrelationTemplate, CorrelationWorkspace, Mode};
+
+let chunks: Vec<Vec<f32>> = vec![vec![0.0; 1000], vec![0.5; 1000]];
+let mut templates = vec![
+    CorrelationTemplate::new(&[0.5, 1.0, 0.5]),
+    CorrelationTemplate::new(&[1.0, -1.0, 1.0, -1.0]),
+];
+
+let mut workspace = CorrelationWorkspace::new();
+let mut output = Vec::new();
+for chunk in &chunks {
+    // The signal is transformed once per FFT size, however many templates follow.
+    workspace.load_signal(chunk);
+    for template in &mut templates {
+        // Each template's spectrum is computed once per FFT size and then reused.
+        workspace.correlate(template, Mode::Full, &mut output).unwrap();
+        println!("{} correlation samples", output.len());
+    }
+}
+```
+
+The FFT size of each correlation depends only on that signal and template, so the output is bit-identical to `fft_correlate_1d` on the same pair. A template keeps its spectrum for the four most recent FFT sizes.
+
 ### Python
 
 ```python
@@ -140,7 +170,7 @@ Returns only indices where the template fully overlaps the signal, with length `
 
 ## Performance
 
-The library uses thread-local FFT planner caching to avoid repeated planning overhead. For correlation of signals of length N and M:
+The library uses thread-local FFT planner caching to avoid repeated planning overhead. The FFT size is the smallest `m * 2^k` with `m` in 1, 3, 5, 9, 15 that covers `N + M - 1`; the coarse steps keep templates of similar length on the same size, so a `CorrelationWorkspace` can share the signal's forward FFT between them. For correlation of signals of length N and M:
 
 - Time complexity: O((N+M) log(N+M))
 - Space complexity: O(N+M)
