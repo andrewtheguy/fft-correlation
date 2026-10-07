@@ -20,7 +20,7 @@
 //!
 //! - **Full**: Returns complete correlation result with length `N + M - 1` where N is signal length
 //!   and M is template length. Output index k corresponds to the lag where template[M-1] aligns
-//!   with signal[k].
+//!   with `signal[k]`.
 //!
 //! - **Same**: Returns centered output with length equal to the signal. The center of the Full
 //!   result is extracted to produce output of the same size as the input signal.
@@ -30,8 +30,8 @@
 //!
 //! # References
 //!
-//! - scipy.signal.correlate: https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.correlate.html
-//! - numpy.correlate: https://numpy.org/doc/stable/reference/generated/numpy.correlate.html
+//! - scipy.signal.correlate: <https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.correlate.html>
+//! - numpy.correlate: <https://numpy.org/doc/stable/reference/generated/numpy.correlate.html>
 
 use realfft::{num_complex::Complex, ComplexToReal, RealFftPlanner, RealToComplex};
 use std::{cell::RefCell, collections::VecDeque, sync::Arc};
@@ -112,7 +112,7 @@ fn get_fft_plans(fft_size: usize) -> FftPlans {
 ///
 /// Determines the size of the correlation output. The indexing convention follows
 /// scipy.signal.correlate: in Full mode, index k represents the lag where the
-/// template's last sample aligns with signal[k].
+/// template's last sample aligns with `signal[k]`.
 ///
 /// - `Full`: Complete correlation (length = signal.len() + template.len() - 1)
 /// - `Same`: Centered output matching signal size (length = signal.len())
@@ -120,15 +120,15 @@ fn get_fft_plans(fft_size: usize) -> FftPlans {
 ///
 /// # Indexing Details
 ///
-/// In Full mode, output[i + template.len() - 1] contains the correlation value
-/// for a window starting at signal[i]. For Same mode, the center index is
+/// In Full mode, `output[i + template.len() - 1]` contains the correlation value
+/// for a window starting at `signal[i]`. For Same mode, the center index is
 /// (output_len - signal.len()) / 2, providing a symmetric view. For Valid mode,
 /// only indices where the template fully overlaps the signal are returned.
 ///
 /// # References
 ///
 /// scipy.signal.correlate documentation:
-/// https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.correlate.html
+/// <https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.correlate.html>
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Full correlation output (signal.len() + template.len() - 1 samples)
@@ -156,13 +156,14 @@ fn fast_fft_size(min_size: usize) -> usize {
         .expect("there is at least one factor")
 }
 
-/// Number of FFT sizes a [`CorrelationTemplate`] keeps spectra for.
+/// Number of FFT sizes a [`CorrelationTemplate`] keeps spectra for (least recently used is
+/// evicted first).
 const TEMPLATE_SPECTRUM_CACHE_CAPACITY: usize = 4;
 
 /// A correlation template with its time-reversed spectrum cached per FFT size, so repeated
 /// correlations against new signals only transform the signal.
 ///
-/// Spectra for the most recent [`TEMPLATE_SPECTRUM_CACHE_CAPACITY`] FFT sizes are kept.
+/// Spectra for the four most recently used FFT sizes are kept.
 pub struct CorrelationTemplate {
     reversed: Vec<f32>,
     spectra: Vec<(usize, Vec<Complex<f32>>)>,
@@ -193,7 +194,10 @@ impl CorrelationTemplate {
     /// Spectrum of the zero-padded, reversed template at `fft_size`.
     fn spectrum(&mut self, fft_size: usize) -> Result<&[Complex<f32>]> {
         if let Some(index) = self.spectra.iter().position(|(size, _)| *size == fft_size) {
-            return Ok(&self.spectra[index].1);
+            // Most recently used last, so the eviction below drops the least recently used.
+            let last = self.spectra.len() - 1;
+            self.spectra[index..].rotate_left(1);
+            return Ok(&self.spectra[last].1);
         }
         debug_assert!(
             fft_size >= self.reversed.len(),
@@ -413,8 +417,8 @@ impl CorrelationWorkspace {
 ///
 /// # References
 ///
-/// - scipy.signal.correlate: https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.correlate.html
-/// - numpy.correlate: https://numpy.org/doc/stable/reference/generated/numpy.correlate.html
+/// - scipy.signal.correlate: <https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.correlate.html>
+/// - numpy.correlate: <https://numpy.org/doc/stable/reference/generated/numpy.correlate.html>
 pub fn fft_correlate_1d(signal: &[f32], template: &[f32], mode: Mode) -> Result<Vec<f32>> {
     let mut workspace = CorrelationWorkspace::new();
     let mut template = CorrelationTemplate::new(template);
@@ -433,15 +437,15 @@ mod tests {
         let output_len = signal.len() + template.len() - 1;
         let mut result = vec![0.0; output_len];
 
-        for lag in 0..output_len {
+        for (lag, out) in result.iter_mut().enumerate() {
             let mut correlation = 0.0;
-            for i in 0..template.len() {
+            for (i, &t) in template.iter().enumerate() {
                 let signal_idx = lag as isize - (template.len() as isize - 1) + i as isize;
                 if (0..signal.len() as isize).contains(&signal_idx) {
-                    correlation += signal[signal_idx as usize] * template[i];
+                    correlation += signal[signal_idx as usize] * t;
                 }
             }
-            result[lag] = correlation;
+            *out = correlation;
         }
 
         result
@@ -574,7 +578,7 @@ mod tests {
             .map(|(i, _)| i)
             .unwrap();
 
-        assert!(max_idx >= 1 && max_idx <= 3);
+        assert!((1..=3).contains(&max_idx));
     }
 
     #[test]
@@ -631,11 +635,11 @@ mod tests {
             let sample_rate = 16000.0;
             let duration = samples as f32 / sample_rate;
             let mut signal = vec![0.0; samples];
-            for n in 0..samples {
+            for (n, sample) in signal.iter_mut().enumerate() {
                 let t = n as f32 / sample_rate;
                 let k = (f_end - f_start) / duration;
                 let phase = 2.0 * PI * (f_start * t + k * t * t / 2.0);
-                signal[n] = phase.sin();
+                *sample = phase.sin();
             }
             signal
         }
@@ -1404,6 +1408,29 @@ mod tests {
         assert_close(&output, &naive_full_correlation(&signal, &template));
         let kept: Vec<usize> = cached.spectra.iter().map(|(size, _)| *size).collect();
         assert_eq!(kept, vec![64, 128, 256, 8]);
+    }
+
+    #[test]
+    fn test_template_spectrum_cache_hit_refreshes_recency() {
+        let template: Vec<f32> = (0..5).map(|i| ((i * 3 % 5) as f32 - 2.0) / 2.0).collect();
+        let mut cached = CorrelationTemplate::new(&template);
+        let kept = |cached: &CorrelationTemplate| -> Vec<usize> {
+            cached.spectra.iter().map(|(size, _)| *size).collect()
+        };
+
+        for fft_size in [8, 16, 32, 64] {
+            cached.spectrum(fft_size).unwrap();
+        }
+        assert_eq!(kept(&cached), vec![8, 16, 32, 64]);
+
+        // A hit moves the size to the most recently used end and returns its spectrum.
+        let expected = cached.spectra[0].1.clone();
+        assert_eq!(cached.spectrum(8).unwrap(), expected.as_slice());
+        assert_eq!(kept(&cached), vec![16, 32, 64, 8]);
+
+        // The next miss evicts 16, the least recently used, not the size just hit.
+        cached.spectrum(128).unwrap();
+        assert_eq!(kept(&cached), vec![32, 64, 8, 128]);
     }
 
     #[test]

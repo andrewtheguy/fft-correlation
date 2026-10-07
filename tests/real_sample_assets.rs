@@ -94,8 +94,10 @@ fn read_pcm16_mono_wav(path: &Path) -> WavData {
     );
 
     let samples = data
-        .chunks_exact(2)
-        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32_768.0)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&chunk| i16::from_le_bytes(chunk) as f32 / 32_768.0)
         .collect();
 
     WavData {

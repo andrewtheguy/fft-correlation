@@ -111,7 +111,7 @@ for chunk in &chunks {
 }
 ```
 
-The FFT size of each correlation depends only on that signal and template, so the output is bit-identical to `fft_correlate_1d` on the same pair. The workspace keeps the signal's spectrum for one FFT size at a time, so correlate templates of similar length consecutively (e.g. sorted by length) to avoid transforming the signal again. A template keeps its spectrum for the four most recent FFT sizes.
+The FFT size of each correlation depends only on that signal and template, so the output is bit-identical to `fft_correlate_1d` on the same pair. The workspace keeps the signal's spectrum for one FFT size at a time, so correlate templates of similar length consecutively (e.g. sorted by length) to avoid transforming the signal again. A template keeps its spectrum for the four most recently used FFT sizes.
 
 ### Python
 
